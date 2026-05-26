@@ -472,7 +472,6 @@ export default function App() {
 
           <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 18 }}>
             График отображает изменение влажности по зонам в реальном времени, в секундах.
-            Порог запуска полива — {START_THRESHOLD}%, порог остановки — {STOP_THRESHOLD}%.
           </div>
 
           <div style={{ width: "100%", height: 420 }}>
