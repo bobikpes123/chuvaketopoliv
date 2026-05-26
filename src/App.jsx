@@ -15,101 +15,33 @@ import {
 const START_THRESHOLD = 15;
 const STOP_THRESHOLD = 75;
 
-const WET_TARGET = 80;
-const DRY_TARGET = 8;
-
-const WET_TAU_SEC = 110;
-const DRY_TAU_SEC = 12000;
-
-const TICK_MS = 2000;
-const GRAPH_STEP_SECONDS = TICK_MS / 1000;
-
-const STORAGE_KEY = "avtopoliv_dashboard_state_v1";
-
 const COLORS = ["#111827", "#374151", "#4b5563", "#6b7280", "#1f2937", "#525252"];
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function makeInitialZones() {
-  return [
-    { id: 1, moisture: 43, watering: false, valveOpen: false },
-    { id: 2, moisture: 58, watering: false, valveOpen: false },
-    { id: 3, moisture: 28, watering: false, valveOpen: false },
-    { id: 4, moisture: 67, watering: false, valveOpen: false },
-    { id: 5, moisture: 14, watering: true, valveOpen: true },
-    { id: 6, moisture: 51, watering: false, valveOpen: false },
-  ];
-}
-
-function makeInitialHistory(zones) {
-  return Array.from({ length: 30 }, (_, i) => ({
-    time: `${i * GRAPH_STEP_SECONDS} c`,
-    seconds: i * GRAPH_STEP_SECONDS,
-    zone1: zones[0].moisture,
-    zone2: zones[1].moisture,
-    zone3: zones[2].moisture,
-    zone4: zones[3].moisture,
-    zone5: zones[4].moisture,
-    zone6: zones[5].moisture,
-  }));
-}
-
-function loadSavedState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) {
-      const zones = makeInitialZones();
-
-      return {
-        zones,
-        history: makeInitialHistory(zones),
-        graphStep: 0,
-        lastUpdate: new Date().toISOString(),
-      };
-    }
-
-    const parsed = JSON.parse(raw);
-
-    if (!parsed.zones || !parsed.history) {
-      throw new Error("Некорректные сохранённые данные");
-    }
-
-    return {
-      zones: parsed.zones,
-      history: parsed.history,
-      graphStep: parsed.graphStep || 0,
-      lastUpdate: parsed.lastUpdate || new Date().toISOString(),
-    };
-  } catch {
-    const zones = makeInitialZones();
-
-    return {
-      zones,
-      history: makeInitialHistory(zones),
-      graphStep: 0,
-      lastUpdate: new Date().toISOString(),
-    };
-  }
-}
-
-function saveStateToStorage(state) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-}
-
-function getZoneState(zone) {
-  if (zone.watering) return "Выполняется полив";
-  if (zone.moisture <= START_THRESHOLD) return "Требуется полив";
-  if (zone.moisture >= STOP_THRESHOLD) return "Достаточная влажность";
-  return "Нормальное состояние";
-}
-
-function getZoneBorder(zone) {
-  if (zone.watering) return "#111827";
-  if (zone.moisture <= START_THRESHOLD) return "#991b1b";
-  return "#d1d5db";
+function makeInitialState() {
+  return {
+    zones: [
+      { id: 1, moisture: 43, watering: false, valveOpen: false },
+      { id: 2, moisture: 58, watering: false, valveOpen: false },
+      { id: 3, moisture: 28, watering: false, valveOpen: false },
+      { id: 4, moisture: 67, watering: false, valveOpen: false },
+      { id: 5, moisture: 14, watering: true, valveOpen: true },
+      { id: 6, moisture: 51, watering: false, valveOpen: false },
+    ],
+    history: [
+      {
+        time: "0 c",
+        seconds: 0,
+        zone1: 43,
+        zone2: 58,
+        zone3: 28,
+        zone4: 67,
+        zone5: 14,
+        zone6: 51,
+      },
+    ],
+    hasWater: true,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function getChartDomain(history, keys, padding = 3) {
@@ -132,6 +64,19 @@ function getChartDomain(history, keys, padding = 3) {
     Math.max(0, Math.floor(min - padding)),
     Math.min(100, Math.ceil(max + padding)),
   ];
+}
+
+function getZoneState(zone) {
+  if (zone.watering) return "Выполняется полив";
+  if (zone.moisture <= START_THRESHOLD) return "Требуется полив";
+  if (zone.moisture >= STOP_THRESHOLD) return "Достаточная влажность";
+  return "Нормальное состояние";
+}
+
+function getZoneBorder(zone) {
+  if (zone.watering) return "#111827";
+  if (zone.moisture <= START_THRESHOLD) return "#991b1b";
+  return "#d1d5db";
 }
 
 function Panel({ title, value, subtitle, icon }) {
@@ -227,7 +172,7 @@ function ZoneCard({ zone }) {
             Влажность почвы
           </div>
           <div style={{ fontSize: 46, fontWeight: 800, color: "#111827" }}>
-            {zone.moisture.toFixed(1)}%
+            {Number(zone.moisture).toFixed(1)}%
           </div>
         </div>
 
@@ -299,30 +244,61 @@ function ZoneChart({ history, zoneId }) {
 }
 
 export default function App() {
-  const savedState = useMemo(() => loadSavedState(), []);
+  const initial = useMemo(() => makeInitialState(), []);
 
-  const [zones, setZones] = useState(savedState.zones);
-  const [history, setHistory] = useState(savedState.history);
-  const [graphStep, setGraphStep] = useState(savedState.graphStep);
-  const [lastUpdate, setLastUpdate] = useState(new Date(savedState.lastUpdate));
+  const [zones, setZones] = useState(initial.zones);
+  const [history, setHistory] = useState(initial.history);
+  const [hasWater, setHasWater] = useState(initial.hasWater);
 
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [serverConnected, setServerConnected] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [errorText, setErrorText] = useState("");
 
-  // Поплавковый датчик уровня воды определяет только наличие воды.
-  const [hasWater] = useState(true);
+  async function loadStateFromServer() {
+    if (!navigator.onLine) {
+      setIsOnline(false);
+      setServerConnected(false);
+      setErrorText("Обновление данных остановлено.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/state", {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error("Ошибка получения данных с сервера");
+      }
+
+      const data = await response.json();
+
+      setZones(Array.isArray(data.zones) ? data.zones : initial.zones);
+      setHistory(Array.isArray(data.history) ? data.history : initial.history);
+      setHasWater(data.hasWater !== false);
+      setLastUpdate(new Date(data.updatedAt || Date.now()));
+      setIsOnline(true);
+      setServerConnected(true);
+      setErrorText("");
+    } catch (error) {
+      setServerConnected(false);
+      setErrorText("Обновление данных остановлено.");
+    }
+  }
 
   useEffect(() => {
-    saveStateToStorage({
-      zones,
-      history,
-      graphStep,
-      lastUpdate: lastUpdate.toISOString(),
-    });
-  }, [zones, history, graphStep, lastUpdate]);
+    const handleOnline = () => {
+      setIsOnline(true);
+      loadStateFromServer();
+    };
 
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    const handleOffline = () => {
+      setIsOnline(false);
+      setServerConnected(false);
+      setErrorText("Обновление данных остановлено.");
+    };
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
@@ -334,98 +310,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    loadStateFromServer();
+
     const timer = setInterval(() => {
-      if (!isOnline) {
-        return;
+      if (navigator.onLine) {
+        loadStateFromServer();
+      } else {
+        setIsOnline(false);
+        setServerConnected(false);
+        setErrorText("Обновление данных остановлено.");
       }
-
-      const dtSec = TICK_MS / 1000;
-
-      setZones((current) => {
-        let next = current.map((z) => ({ ...z }));
-
-        let activeIndex = next.findIndex((z) => z.watering);
-
-        if (activeIndex === -1 && hasWater) {
-          const dryIndex = next.findIndex((z) => z.moisture <= START_THRESHOLD);
-          if (dryIndex !== -1) {
-            next[dryIndex].watering = true;
-            next[dryIndex].valveOpen = true;
-            activeIndex = dryIndex;
-          }
-        }
-
-        next = next.map((zone, index) => {
-          const isWatering = index === activeIndex && zone.watering;
-
-          let newMoisture = zone.moisture;
-
-          if (isWatering && hasWater) {
-            const factor = 1 - Math.exp(-dtSec / WET_TAU_SEC);
-            newMoisture = zone.moisture + (WET_TARGET - zone.moisture) * factor;
-          } else {
-            const factor = 1 - Math.exp(-dtSec / DRY_TAU_SEC);
-            newMoisture = zone.moisture + (DRY_TARGET - zone.moisture) * factor;
-          }
-
-          newMoisture = clamp(newMoisture, 0, 100);
-
-          let watering = zone.watering;
-          let valveOpen = zone.valveOpen;
-
-          if (!hasWater) {
-            watering = false;
-            valveOpen = false;
-          }
-
-          if (isWatering && newMoisture >= STOP_THRESHOLD) {
-            watering = false;
-            valveOpen = false;
-          }
-
-          return {
-            ...zone,
-            moisture: newMoisture,
-            watering,
-            valveOpen,
-          };
-        });
-
-        const now = new Date();
-        setLastUpdate(now);
-
-        setGraphStep((prev) => {
-          const nextStep = prev + GRAPH_STEP_SECONDS;
-
-          setHistory((old) => {
-            const point = {
-              time: `${nextStep} c`,
-              seconds: nextStep,
-              zone1: next[0].moisture,
-              zone2: next[1].moisture,
-              zone3: next[2].moisture,
-              zone4: next[3].moisture,
-              zone5: next[4].moisture,
-              zone6: next[5].moisture,
-            };
-
-            return [...old.slice(-59), point];
-          });
-
-          return nextStep;
-        });
-
-        return next;
-      });
-    }, TICK_MS);
+    }, 2000);
 
     return () => clearInterval(timer);
-  }, [hasWater, isOnline]);
+  }, []);
 
   const pumpActive = zones.some((zone) => zone.watering);
 
   const averageMoisture = useMemo(() => {
-    return zones.reduce((sum, z) => sum + z.moisture, 0) / zones.length;
+    if (!zones.length) return 0;
+    return zones.reduce((sum, z) => sum + Number(z.moisture), 0) / zones.length;
   }, [zones]);
 
   const activeZone = zones.find((z) => z.watering);
@@ -464,14 +368,27 @@ export default function App() {
           </div>
 
           <div style={{ fontSize: 16, color: "#4b5563", lineHeight: 1.6 }}>
-            Контроль влажности почвы по шести зонам. Автоматический запуск полива
-            выполняется при влажности ниже {START_THRESHOLD}%, остановка полива —
-            при достижении {STOP_THRESHOLD}%.
+            Контроль влажности почвы по шести зонам.
           </div>
 
           <div style={{ marginTop: 12, fontSize: 14, color: "#6b7280" }}>
             Последнее обновление: {lastUpdate.toLocaleTimeString("ru-RU")}
           </div>
+
+          {errorText && (
+            <div
+              style={{
+                marginTop: 14,
+                padding: 12,
+                border: "1px solid #991b1b",
+                color: "#991b1b",
+                background: "#fef2f2",
+                fontSize: 14,
+              }}
+            >
+              {errorText}
+            </div>
+          )}
         </div>
 
         <div
@@ -512,9 +429,13 @@ export default function App() {
 
           <Panel
             title="Связь с сервером"
-            value={isOnline ? "Есть" : "Нет"}
-            subtitle={isOnline ? "Данные обновляются" : "Обновление остановлено"}
-            icon={isOnline ? <Wifi size={20} /> : <WifiOff size={20} />}
+            value={isOnline && serverConnected ? "Есть" : "Нет"}
+            subtitle={
+              isOnline && serverConnected
+                ? "Данные получены с сервера"
+                : "Обновление остановлено"
+            }
+            icon={isOnline && serverConnected ? <Wifi size={20} /> : <WifiOff size={20} />}
           />
         </div>
 
@@ -546,11 +467,6 @@ export default function App() {
         >
           <div style={{ fontSize: 26, fontWeight: 800, marginBottom: 8 }}>
             Общий график влажности почвы
-          </div>
-
-          <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 18 }}>
-            График отображает изменение влажности по зонам в реальном времени, в секундах.
-            Порог запуска полива — {START_THRESHOLD}%, порог остановки — {STOP_THRESHOLD}%.
           </div>
 
           <div style={{ width: "100%", height: 420 }}>
