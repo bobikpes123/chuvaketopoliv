@@ -1,290 +1,535 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
-import { Droplets, Wifi, WifiOff, Power, AlertTriangle, Activity, Gauge, Waves } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from "recharts";
+import { Gauge, Waves, AlertTriangle, Power } from "lucide-react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+  ReferenceLine,
+} from "recharts";
 
 const START_THRESHOLD = 15;
 const STOP_THRESHOLD = 75;
 
-const initialZones = [
-  { id: 1, moisture: 42, valve: false, watering: false },
-  { id: 2, moisture: 68, valve: false, watering: false },
-  { id: 3, moisture: 22, valve: false, watering: false },
-  { id: 4, moisture: 81, valve: false, watering: false },
-  { id: 5, moisture: 13, valve: true, watering: true },
-  { id: 6, moisture: 55, valve: false, watering: false },
-];
+const WET_TARGET = 80;
+const DRY_TARGET = 8;
 
-function Card({ children, className = "" }) {
-  return <div className={className}>{children}</div>;
-}
+// Чем больше значение, тем медленнее меняется влажность.
+// WET_TAU_SEC = 75 делает рост влажности при поливе медленнее.
+// DRY_TAU_SEC = 12000 делает потерю влаги очень плавной.
+const WET_TAU_SEC = 140;
+const DRY_TAU_SEC = 15000;
 
-function CardContent({ children, className = "" }) {
-  return <div className={className}>{children}</div>;
-}
+// Обновление данных каждые 2 секунды
+const TICK_MS = 2000;
+const GRAPH_STEP_SECONDS = TICK_MS / 1000;
 
-function Button({ children, onClick, variant = "default", className = "" }) {
-  return (
-    <button
-      onClick={onClick}
-      className={className}
-      style={{
-        padding: "10px 16px",
-        borderRadius: "14px",
-        border: variant === "outline" ? "1px solid #cbd5e1" : "none",
-        background: variant === "outline" ? "#ffffff" : "#0f172a",
-        color: variant === "outline" ? "#0f172a" : "#ffffff",
-        cursor: "pointer",
-        fontWeight: 600,
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "8px",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
+const COLORS = ["#111827", "#374151", "#4b5563", "#6b7280", "#1f2937", "#525252"];
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function getZoneStatus(zone) {
-  if (zone.watering) return "Полив активен";
-  if (zone.moisture <= START_THRESHOLD) return "Нужен полив";
-  if (zone.moisture >= STOP_THRESHOLD) return "Полив не требуется";
-  return "Ожидание";
+function makeInitialZones() {
+  return [
+    { id: 1, moisture: 43, watering: false, valveOpen: false },
+    { id: 2, moisture: 58, watering: false, valveOpen: false },
+    { id: 3, moisture: 28, watering: false, valveOpen: false },
+    { id: 4, moisture: 67, watering: false, valveOpen: false },
+    { id: 5, moisture: 14, watering: true, valveOpen: true },
+    { id: 6, moisture: 51, watering: false, valveOpen: false },
+  ];
 }
 
-function getStatusClass(zone) {
-  if (zone.watering) return "border-blue-400 bg-blue-50";
-  if (zone.moisture <= START_THRESHOLD) return "border-red-300 bg-red-50";
-  if (zone.moisture >= STOP_THRESHOLD) return "border-emerald-300 bg-emerald-50";
-  return "border-slate-200 bg-white";
+function getZoneState(zone) {
+  if (zone.watering) return "Выполняется полив";
+  if (zone.moisture <= START_THRESHOLD) return "Требуется полив";
+  if (zone.moisture >= STOP_THRESHOLD) return "Достаточная влажность";
+  return "Нормальное состояние";
 }
 
-function makePoint(step, zones) {
-  const point = { time: `${String(10 + Math.floor(step / 6)).padStart(2, "0")}:${String((step % 6) * 10).padStart(2, "0")}` };
-  zones.forEach((z) => {
-    point[`zone${z.id}`] = z.moisture;
+function getZoneBorder(zone) {
+  if (zone.watering) return "#111827";
+  if (zone.moisture <= START_THRESHOLD) return "#991b1b";
+  return "#d1d5db";
+}
+
+function getChartDomain(history, keys, padding = 3) {
+  const values = [];
+
+  history.forEach((point) => {
+    keys.forEach((key) => {
+      if (typeof point[key] === "number") {
+        values.push(point[key]);
+      }
+    });
   });
-  return point;
+
+  if (values.length === 0) {
+    return [0, 100];
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  return [
+    Math.max(0, Math.floor(min - padding)),
+    Math.min(100, Math.ceil(max + padding)),
+  ];
 }
 
-export default function IrrigationDashboardDemo() {
-  const [zones, setZones] = useState(initialZones);
-  const [history, setHistory] = useState(() => [makePoint(0, initialZones)]);
-  const [step, setStep] = useState(1);
-  const [online, setOnline] = useState(true);
-  const [autoMode, setAutoMode] = useState(true);
-  const [waterLevel, setWaterLevel] = useState(86);
+function Panel({ title, value, subtitle, icon }) {
+  return (
+    <div
+      style={{
+        background: "#ffffff",
+        border: "1px solid #d1d5db",
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 12,
+          color: "#4b5563",
+          fontSize: 14,
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+        }}
+      >
+        <span>{title}</span>
+        <span>{icon}</span>
+      </div>
+
+      <div style={{ fontSize: 30, fontWeight: 700, color: "#111827" }}>
+        {value}
+      </div>
+
+      <div style={{ marginTop: 8, fontSize: 14, color: "#6b7280" }}>
+        {subtitle}
+      </div>
+    </div>
+  );
+}
+
+function ZoneCard({ zone }) {
+  return (
+    <div
+      style={{
+        background: "#ffffff",
+        border: `2px solid ${getZoneBorder(zone)}`,
+        padding: 20,
+        minHeight: 190,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          gap: 16,
+          borderBottom: "1px solid #e5e7eb",
+          paddingBottom: 14,
+          marginBottom: 16,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 24, fontWeight: 700, color: "#111827" }}>
+            Зона {zone.id}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 14, color: "#4b5563" }}>
+            {getZoneState(zone)}
+          </div>
+        </div>
+
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 700,
+            color: zone.valveOpen ? "#111827" : "#6b7280",
+            border: "1px solid #d1d5db",
+            padding: "7px 10px",
+            height: "fit-content",
+            background: zone.valveOpen ? "#f3f4f6" : "#ffffff",
+          }}
+        >
+          {zone.valveOpen ? "Клапан открыт" : "Клапан закрыт"}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 18,
+          alignItems: "center",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 14, color: "#6b7280", marginBottom: 6 }}>
+            Влажность почвы
+          </div>
+          <div style={{ fontSize: 46, fontWeight: 800, color: "#111827" }}>
+            {zone.moisture.toFixed(1)}%
+          </div>
+        </div>
+
+        <div style={{ fontSize: 14, color: "#374151", lineHeight: 1.8 }}>
+          <div>
+            Пуск полива: <b>≤ {START_THRESHOLD}%</b>
+          </div>
+          <div>
+            Остановка: <b>≥ {STOP_THRESHOLD}%</b>
+          </div>
+          <div>
+            Насос: <b>{zone.watering ? "включён" : "выключен"}</b>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ZoneChart({ history, zoneId }) {
+  const data = history.map((point) => ({
+    time: point.time,
+    value: point[`zone${zoneId}`],
+  }));
+
+  const domain = getChartDomain(data, ["value"], 2);
+
+  return (
+    <div
+      style={{
+        background: "#ffffff",
+        border: "1px solid #d1d5db",
+        padding: 16,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 16,
+          fontWeight: 700,
+          marginBottom: 12,
+          color: "#111827",
+        }}
+      >
+        Зона {zoneId}
+      </div>
+
+      <div style={{ width: "100%", height: 210 }}>
+        <ResponsiveContainer>
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="time" />
+            <YAxis domain={domain} unit="%" width={42} />
+            <Tooltip />
+            <ReferenceLine y={START_THRESHOLD} stroke="#991b1b" strokeDasharray="4 4" />
+            <ReferenceLine y={STOP_THRESHOLD} stroke="#166534" strokeDasharray="4 4" />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke={COLORS[(zoneId - 1) % COLORS.length]}
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [zones, setZones] = useState(makeInitialZones);
+
+  // Поплавковый датчик уровня воды определяет только наличие воды.
+  const [hasWater] = useState(true);
+
   const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [graphStep, setGraphStep] = useState(0);
+
+  const [history, setHistory] = useState(() => {
+    const initial = makeInitialZones();
+
+    return Array.from({ length: 30 }, (_, i) => ({
+      time: `${i * GRAPH_STEP_SECONDS} c`,
+      seconds: i * GRAPH_STEP_SECONDS,
+      zone1: initial[0].moisture,
+      zone2: initial[1].moisture,
+      zone3: initial[2].moisture,
+      zone4: initial[3].moisture,
+      zone5: initial[4].moisture,
+      zone6: initial[5].moisture,
+    }));
+  });
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setZones((current) => {
-        let pumpBusy = false;
-        const next = current.map((zone) => {
-          let watering = zone.watering;
+      const dtSec = TICK_MS / 1000;
 
-          if (autoMode) {
-            if (!watering && zone.moisture <= START_THRESHOLD && !pumpBusy && waterLevel > 10) {
-              watering = true;
-              pumpBusy = true;
-            } else if (watering && zone.moisture >= STOP_THRESHOLD) {
-              watering = false;
-            } else if (watering) {
-              pumpBusy = true;
-            }
+      setZones((current) => {
+        let next = current.map((z) => ({ ...z }));
+
+        let activeIndex = next.findIndex((z) => z.watering);
+
+        if (activeIndex === -1 && hasWater) {
+          const dryIndex = next.findIndex((z) => z.moisture <= START_THRESHOLD);
+          if (dryIndex !== -1) {
+            next[dryIndex].watering = true;
+            next[dryIndex].valveOpen = true;
+            activeIndex = dryIndex;
+          }
+        }
+
+        next = next.map((zone, index) => {
+          const isWatering = index === activeIndex && zone.watering;
+
+          let newMoisture = zone.moisture;
+
+          if (isWatering && hasWater) {
+            const factor = 1 - Math.exp(-dtSec / WET_TAU_SEC);
+            newMoisture = zone.moisture + (WET_TARGET - zone.moisture) * factor;
+          } else {
+            const factor = 1 - Math.exp(-dtSec / DRY_TAU_SEC);
+            newMoisture = zone.moisture + (DRY_TARGET - zone.moisture) * factor;
           }
 
-          const drift = watering ? 7 : -Math.floor(Math.random() * 3);
-          const noise = Math.floor(Math.random() * 3) - 1;
-          const moisture = clamp(zone.moisture + drift + noise, 5, 95);
+          newMoisture = clamp(newMoisture, 0, 100);
 
-          if (moisture >= STOP_THRESHOLD) watering = false;
+          let watering = zone.watering;
+          let valveOpen = zone.valveOpen;
+
+          if (!hasWater) {
+            watering = false;
+            valveOpen = false;
+          }
+
+          if (isWatering && newMoisture >= STOP_THRESHOLD) {
+            watering = false;
+            valveOpen = false;
+          }
 
           return {
             ...zone,
-            moisture,
+            moisture: newMoisture,
             watering,
-            valve: watering,
+            valveOpen,
           };
         });
 
-        setHistory((old) => {
-          const updated = [...old, makePoint(step, next)].slice(-18);
-          return updated;
+        const now = new Date();
+        setLastUpdate(now);
+
+        setGraphStep((prev) => {
+          const nextStep = prev + GRAPH_STEP_SECONDS;
+
+          setHistory((old) => {
+            const point = {
+              time: `${nextStep} c`,
+              seconds: nextStep,
+              zone1: next[0].moisture,
+              zone2: next[1].moisture,
+              zone3: next[2].moisture,
+              zone4: next[3].moisture,
+              zone5: next[4].moisture,
+              zone6: next[5].moisture,
+            };
+
+            return [...old.slice(-59), point];
+          });
+
+          return nextStep;
         });
-        setStep((s) => s + 1);
-        setLastUpdate(new Date());
-        setWaterLevel((level) => clamp(level - (next.some((z) => z.watering) ? 1 : 0), 0, 100));
+
         return next;
       });
-    }, 2400);
+    }, TICK_MS);
 
     return () => clearInterval(timer);
-  }, [autoMode, step, waterLevel]);
+  }, [hasWater]);
 
   const pumpActive = zones.some((zone) => zone.watering);
-  const averageMoisture = Math.round(zones.reduce((sum, zone) => sum + zone.moisture, 0) / zones.length);
-  const activeValves = zones.filter((zone) => zone.valve).length;
-  const alarm = waterLevel <= 10;
 
-  const chartLines = useMemo(() => zones.map((zone) => ({ key: `zone${zone.id}`, name: `Зона ${zone.id}` })), [zones]);
+  const averageMoisture = useMemo(() => {
+    return zones.reduce((sum, z) => sum + z.moisture, 0) / zones.length;
+  }, [zones]);
+
+  const activeZone = zones.find((z) => z.watering);
+  const alarm = !hasWater;
+
+  const generalChartDomain = getChartDomain(
+    history,
+    ["zone1", "zone2", "zone3", "zone4", "zone5", "zone6"],
+    4
+  );
 
   return (
-    <div className="min-h-screen bg-slate-100 p-4 text-slate-900 md:p-8">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <motion.div
-          initial={{ opacity: 0, y: -12 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="rounded-3xl bg-white p-6 shadow-sm"
+    <div
+      style={{
+        minHeight: "100vh",
+        width: "100%",
+        background: "#f3f4f6",
+        padding: "16px",
+        boxSizing: "border-box",
+        fontFamily:
+          'Arial, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        color: "#111827",
+      }}
+    >
+      <div style={{ width: "100%", margin: 0 }}>
+        <div
+          style={{
+            background: "#ffffff",
+            border: "1px solid #d1d5db",
+            padding: 26,
+            marginBottom: 22,
+          }}
         >
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold tracking-tight">Система автоматического полива</h1>
-              <p className="mt-2 text-slate-600">Мониторинг влажности почвы, состояния насоса и клапанов по 6 зонам</p>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <Button onClick={() => setAutoMode((v) => !v)} className="rounded-2xl px-5">
-                <Power className="mr-2 h-4 w-4" />
-                {autoMode ? "AUTO" : "MANUAL"}
-              </Button>
-              <Button variant="outline" onClick={() => setOnline((v) => !v)} className="rounded-2xl px-5">
-                {online ? <Wifi className="mr-2 h-4 w-4" /> : <WifiOff className="mr-2 h-4 w-4" />}
-                {online ? "Онлайн" : "Не в сети"}
-              </Button>
-            </div>
+          <div style={{ fontSize: 32, fontWeight: 800, marginBottom: 8 }}>
+            Система автоматического полива растений
           </div>
-        </motion.div>
 
-        <div className="grid gap-4 md:grid-cols-4">
-          <Card className="rounded-3xl shadow-sm">
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-500">Средняя влажность</p>
-                <Gauge className="h-5 w-5 text-slate-500" />
-              </div>
-              <p className="mt-3 text-4xl font-bold">{averageMoisture}%</p>
-              <p className="mt-2 text-sm text-slate-500">По всем зонам</p>
-            </CardContent>
-          </Card>
+          <div style={{ fontSize: 16, color: "#4b5563", lineHeight: 1.6 }}>
+          </div>
 
-          <Card className="rounded-3xl shadow-sm">
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-500">Насос</p>
-                <Droplets className="h-5 w-5 text-slate-500" />
-              </div>
-              <p className="mt-3 text-3xl font-bold">{pumpActive ? "Включён" : "Выключен"}</p>
-              <p className="mt-2 text-sm text-slate-500">Активных клапанов: {activeValves}</p>
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-3xl shadow-sm">
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-500">Уровень воды</p>
-                <Waves className="h-5 w-5 text-slate-500" />
-              </div>
-              <p className="mt-3 text-4xl font-bold">{waterLevel}%</p>
-              <p className="mt-2 text-sm text-slate-500">Резервуар</p>
-            </CardContent>
-          </Card>
-
-          <Card className={`rounded-3xl shadow-sm ${alarm ? "border-red-300 bg-red-50" : ""}`}>
-            <CardContent className="p-5">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-slate-500">Аварии</p>
-                <AlertTriangle className="h-5 w-5 text-slate-500" />
-              </div>
-              <p className="mt-3 text-3xl font-bold">{alarm ? "Есть" : "Нет"}</p>
-              <p className="mt-2 text-sm text-slate-500">Последнее обновление: {lastUpdate.toLocaleTimeString()}</p>
-            </CardContent>
-          </Card>
+          <div style={{ marginTop: 12, fontSize: 14, color: "#6b7280" }}>
+            Последнее обновление: {lastUpdate.toLocaleTimeString("ru-RU")}
+          </div>
         </div>
 
-        <Card className="rounded-3xl shadow-sm">
-          <CardContent className="p-6">
-            <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-              <div>
-                <h2 className="text-2xl font-bold">Зоны полива</h2>
-                <p className="text-slate-600">Полив включается при влажности 15% и отключается при достижении 75%</p>
-              </div>
-              <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-600">
-                Порог включения: {START_THRESHOLD}% / порог отключения: {STOP_THRESHOLD}%
-              </div>
-            </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 16,
+            marginBottom: 24,
+          }}
+        >
+          <Panel
+            title="Средняя влажность"
+            value={`${averageMoisture.toFixed(1)}%`}
+            subtitle="Среднее значение по зонам"
+            icon={<Gauge size={20} />}
+          />
 
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {zones.map((zone) => (
-                <motion.div
-                  key={zone.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={`rounded-3xl border p-5 shadow-sm ${getStatusClass(zone)}`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="text-xl font-bold">Зона {zone.id}</h3>
-                      <p className="mt-1 text-sm text-slate-600">{getZoneStatus(zone)}</p>
-                    </div>
-                    <div className="rounded-2xl bg-white px-3 py-1 text-sm font-semibold shadow-sm">
-                      {zone.valve ? "Клапан открыт" : "Клапан закрыт"}
-                    </div>
-                  </div>
+          <Panel
+            title="Насос"
+            value={pumpActive ? "Включён" : "Выключен"}
+            subtitle={activeZone ? `Поливается зона ${activeZone.id}` : "Полив не выполняется"}
+            icon={<Power size={20} />}
+          />
 
-                  <div className="mt-5 flex items-end justify-between gap-4">
-                    <div>
-                      <p className="text-sm text-slate-500">Влажность почвы</p>
-                      <p className="text-5xl font-bold">{zone.moisture}%</p>
-                    </div>
-                    <Activity className={`h-10 w-10 ${zone.watering ? "text-blue-500" : "text-slate-400"}`} />
-                  </div>
+          <Panel
+            title="Вода в баке"
+            value={hasWater ? "Есть" : "Нет"}
+            subtitle="Состояние поплавкового датчика"
+            icon={<Waves size={20} />}
+          />
 
-                  <div className="mt-5 h-3 overflow-hidden rounded-full bg-white">
-                    <div className="h-full rounded-full bg-slate-900 transition-all duration-700" style={{ width: `${zone.moisture}%` }} />
-                  </div>
+          <Panel
+            title="Аварийный режим"
+            value={alarm ? "Активен" : "Нет"}
+            subtitle={alarm ? "Недостаточно воды" : "Ошибок не обнаружено"}
+            icon={<AlertTriangle size={20} />}
+          />
+        </div>
 
-                  <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
-                    <div className="rounded-2xl bg-white p-3">
-                      <p className="text-slate-500">Старт полива</p>
-                      <p className="font-bold">≤ {START_THRESHOLD}%</p>
-                    </div>
-                    <div className="rounded-2xl bg-white p-3">
-                      <p className="text-slate-500">Остановка</p>
-                      <p className="font-bold">≥ {STOP_THRESHOLD}%</p>
-                    </div>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ fontSize: 26, fontWeight: 800, marginBottom: 14 }}>
+            Зоны полива
+          </div>
 
-        <Card className="rounded-3xl shadow-sm">
-          <CardContent className="p-6">
-            <h2 className="text-2xl font-bold">График влажности по зонам</h2>
-            <p className="mt-1 text-slate-600">Демонстрационные данные обновляются автоматически, как будто система передаёт их через ESP8266 и сервер</p>
-            <div className="mt-6 h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={history} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="time" />
-                  <YAxis domain={[0, 100]} unit="%" />
-                  <Tooltip />
-                  <Legend />
-                  <ReferenceLine y={START_THRESHOLD} label="15% старт" strokeDasharray="4 4" />
-                  <ReferenceLine y={STOP_THRESHOLD} label="75% стоп" strokeDasharray="4 4" />
-                  {chartLines.map((lineItem) => (
-                    <Line key={lineItem.key} type="monotone" dataKey={lineItem.key} name={lineItem.name} strokeWidth={2} dot={false} />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
-        </Card>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+              gap: 16,
+            }}
+          >
+            {zones.map((zone) => (
+              <ZoneCard key={zone.id} zone={zone} />
+            ))}
+          </div>
+        </div>
+
+        <div
+          style={{
+            background: "#ffffff",
+            border: "1px solid #d1d5db",
+            padding: 22,
+            marginBottom: 24,
+          }}
+        >
+          <div style={{ fontSize: 26, fontWeight: 800, marginBottom: 8 }}>
+            Общий график влажности почвы
+          </div>
+
+          <div style={{ fontSize: 15, color: "#6b7280", marginBottom: 18 }}>
+            График отображает изменение влажности по зонам в реальном времени, в секундах.
+            Порог запуска полива — {START_THRESHOLD}%, порог остановки — {STOP_THRESHOLD}%.
+          </div>
+
+          <div style={{ width: "100%", height: 420 }}>
+            <ResponsiveContainer>
+              <LineChart data={history}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" />
+                <YAxis domain={generalChartDomain} unit="%" />
+                <Tooltip />
+                <Legend />
+                <ReferenceLine
+                  y={START_THRESHOLD}
+                  stroke="#991b1b"
+                  strokeDasharray="5 5"
+                  label="15% старт"
+                />
+                <ReferenceLine
+                  y={STOP_THRESHOLD}
+                  stroke="#166534"
+                  strokeDasharray="5 5"
+                  label="75% стоп"
+                />
+                {zones.map((zone) => (
+                  <Line
+                    key={zone.id}
+                    type="monotone"
+                    dataKey={`zone${zone.id}`}
+                    name={`Зона ${zone.id}`}
+                    stroke={COLORS[(zone.id - 1) % COLORS.length]}
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 26, fontWeight: 800, marginBottom: 14 }}>
+            Графики по отдельным зонам
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+              gap: 16,
+            }}
+          >
+            {zones.map((zone) => (
+              <ZoneChart key={zone.id} history={history} zoneId={zone.id} />
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );
