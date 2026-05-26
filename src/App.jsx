@@ -400,7 +400,6 @@ export default function App() {
           </div>
 
           <div style={{ marginTop: 12, fontSize: 14, color: "#6b7280" }}>
-            Последнее обновление: {lastUpdate.toLocaleTimeString("ru-RU")}
           </div>
         </div>
 
