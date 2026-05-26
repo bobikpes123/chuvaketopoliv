@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Droplets, Wifi, WifiOff, Power, AlertTriangle, Activity, Gauge, Waves } from "lucide-react";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceLine } from "recharts";
 
 const START_THRESHOLD = 15;
@@ -17,6 +15,36 @@ const initialZones = [
   { id: 6, moisture: 55, valve: false, watering: false },
 ];
 
+function Card({ children, className = "" }) {
+  return <div className={className}>{children}</div>;
+}
+
+function CardContent({ children, className = "" }) {
+  return <div className={className}>{children}</div>;
+}
+
+function Button({ children, onClick, variant = "default", className = "" }) {
+  return (
+    <button
+      onClick={onClick}
+      className={className}
+      style={{
+        padding: "10px 16px",
+        borderRadius: "14px",
+        border: variant === "outline" ? "1px solid #cbd5e1" : "none",
+        background: variant === "outline" ? "#ffffff" : "#0f172a",
+        color: variant === "outline" ? "#0f172a" : "#ffffff",
+        cursor: "pointer",
+        fontWeight: 600,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "8px",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
